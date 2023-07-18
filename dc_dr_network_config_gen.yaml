@@ -1,0 +1,267 @@
+#cloud-config
+cloud_init_modules:
+  - write-files
+  - set_hostname
+  - update_hostname
+  - users-groups
+  - ssh
+hostname: Service-vnf
+write_files:
+- content: |
+    interfaces {
+        vni-0/0 {
+            description South_Bound_Network;
+            enable      true;
+            unit 0 {
+                description "South Bound Network connecting to Director and Analytics";
+                enable      true;
+                family {
+                    inet {
+                        address ${South_Bound_Network_ip}/24;
+                    }
+                }
+            }
+        }
+        vni-0/1 {
+            description Controller_1_connect;
+            enable      true;
+            unit 0 {
+                description "controller_1 connectivity";
+                enable      true;
+                family {
+                    inet {
+                        address ${Controller_1_connect}/24;
+                    }
+                }
+            }
+        }
+        vni-0/2 {
+            description Controller_2_connect;
+            enable      true;
+            unit 0 {
+                description "controller_2 connectivity";
+                enable      true;
+                family {
+                    inet {
+                        address ${Controller_2_connect}/24;
+                    }
+                }
+            }
+        }
+    }
+    orgs {
+        org ${parent_org_name} {
+            available-routing-instances   [ vpc-gateway ];
+            owned-routing-instances       [ vpc-gateway ];
+            options {
+                session-limit 1000000;
+            }
+            traffic-identification {
+                using          [ vni-0/0.0 vni-0/1.0 vni-0/2.0 ];
+            }
+            available-service-node-groups [ default-sng ];
+        }
+        org-services ${parent_org_name} {
+            objects {
+                zones {
+                    trust;
+                    untrust;
+                    host;
+                }
+            }
+        }
+    }
+    routing-instances {
+        vpc-gateway {
+            instance-type virtual-router;
+            policy-options {
+                redistribution-policy policy-1 {
+                    term t1-direct {
+                        match {
+                            protocol direct;
+                        }
+                        action {
+                                      accept;
+                            set-origin igp;
+                        }
+                    }
+                    term t2-bgp {
+                        match {
+                            protocol bgp;
+                        }
+                        action {
+                                      accept;
+                            set-origin igp;
+                        }
+                    }
+                }
+                redistribute-to-bgp policy-1;
+            }
+            interfaces    [ vni-0/0.0 vni-0/1.0 vni-0/2.0 ];
+            protocols {
+                bgp {
+                    64002 {
+                        family {
+                            inet {
+                                unicast;
+                            }
+                        }
+                        route-flap {
+                            free-max-time    180;
+                            reuse-max-time   60;
+                            reuse-size       256;
+                            reuse-array-size 1024;
+                        }
+                        graceful-restart {
+                            maximum-restart-time 120;
+                            recovery-time        120;
+                            select-defer-time    120;
+                            stalepath-time       120;
+                        }
+                        router-id ${Controller_1_connect};
+                        local-as {
+                            as-number 64002;
+                        }
+                        group controller-1 {
+                            type external;
+                            neighbor ${controller_1_router_ip} {
+                                local-address ${Controller_1_connect};
+                                local-as      64002;
+                                peer-as       64512;
+                            }
+                        }                        
+                        group controller-2 {
+                            type external;
+                            neighbor ${controller_2_router_ip} {
+                                local-address ${Controller_2_connect};
+                                local-as      64002;
+                                peer-as       64512;
+                            }
+                        }                        
+                    }
+                }
+            }
+        }
+    }
+    service-node-groups {
+        default-sng {
+            id       0;
+            type     internal;
+            services [ cgnat ipsec sdwan ];
+        }
+    }
+    system {
+        session {
+            timeout-hard               0;
+            timeout-udp                30;
+            timeout-tcp                240;
+            timeout-icmp               10;
+            timeout-tcpwait            20;
+            timeout-default            30;
+            check-tcp-syn              false;
+            reevaluate-reverse-flow    false;
+            session-reevaluate         true;
+            tcp-send-reset             true;
+            tcp-secure-reset           false;
+            tcp-adjust-mss {
+                enable          true;
+                interface-types all;
+                mss             1200;
+            }
+            send-icmp-unreachable      false;
+            allow-unsupported-protocol false;
+            session-purge-batch-size   5;
+            interim-update {
+                disable false;
+            }
+        }
+    } 
+  path: /var/tmp/dc_dr_network_connect.cfg    
+- content: |
+    #!/bin/bash
+    log_path="/etc/bootLog.txt"
+    if [ -f "$log_path" ]
+    then
+        echo "Cloud Init script already ran earlier during first time boot.." >> $log_path
+    else
+        touch $log_path
+    UBUNTU_RELEASE="$(lsb_release -cs)"
+    echo "Starting cloud init script..." > $log_path
+
+    echo "Modifying /etc/network/interface file.." >> $log_path
+    cp /etc/network/interfaces /etc/network/interfaces.bak
+    if [[ $UBUNTU_RELEASE == "trusty" ]]; then
+    cat > /etc/network/interfaces << EOF
+    # This file describes the network interfaces available on your system
+    # and how to activate them. For more information, see interfaces(5).
+
+    # The loopback network interface
+    auto lo
+    iface lo inet loopback
+
+    # The primary network interface
+    auto eth0
+    iface eth0 inet dhcp
+
+    # The secondary network interface
+    auto eth1
+    iface eth1 inet dhcp
+
+    # The third network interface
+    auto eth2
+    iface eth2 inet dhcp
+    EOF
+    else
+    cat > /etc/network/interfaces << EOF
+    # This file describes the network interfaces available on your system
+    # and how to activate them. For more information, see interfaces(5).
+
+    # The loopback network interface
+    auto lo
+    iface lo inet loopback
+    # The primary network interface
+    auto eth0
+    iface eth0 inet dhcp
+        offload-gro off
+
+    # The secondary network interface
+    auto eth1
+    iface eth1 inet dhcp
+        offload-gro off
+
+    # The third network interface
+    auto eth2
+    iface eth2 inet dhcp
+        offload-gro off
+    EOF
+    fi
+    echo -e "Modified /etc/network/interface file. Refer below new interface file content:\n`cat /etc/network/interfaces`" >> $log_path
+
+    echo "Restart Network services.." >> $log_path
+    if [[ $UBUNTU_RELEASE == "trusty" ]]; then
+        /etc/init.d/networking restart >> /dev/null 2>&1
+    else
+        systemctl restart networking >> /dev/null 2>&1
+    fi
+    fi
+  path: /var/tmp/initial_vos_cnf.sh
+  permissions : '755'   
+- content: |
+    #!/bin/bash
+    sleep 1m
+    echo -e 'configure\nload merge /var/tmp/dc_dr_network_connect.cfg\ncommit' | /opt/versa/confd/bin/confd_cli -u admin -g admin
+  path: /var/tmp/dc_dr_network_connect.sh
+  permissions : '755'  
+cloud_final_modules:
+- runcmd
+- scripts-user
+runcmd:
+- sed -i.bak "\$a\Match Address ${master_dir_mgmt_ip}/32\n  PasswordAuthentication yes\nMatch all" /etc/ssh/sshd_config
+- sed -i.bak "\$a\Match Address ${master_dir_south_bound_ip}/32\n  PasswordAuthentication yes\nMatch all" /etc/ssh/sshd_config
+- sed -i.bak "\$a\Match Address ${slave_dir_mgmt_ip}/32\n  PasswordAuthentication yes\nMatch all" /etc/ssh/sshd_config
+- sed -i.bak "\$a\Match Address ${slave_dir_south_bound_ip}/32\n  PasswordAuthentication yes\nMatch all" /etc/ssh/sshd_config        
+- sudo service ssh restart
+- cd /var/tmp/
+- ./initial_vos_cnf.sh 
+- ./dc_dr_network_connect.sh 
+- sudo service ssh restart
